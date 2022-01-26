@@ -1,0 +1,925 @@
+---
+title: "TalkingData_project1"
+author: "Goncalo Oliveira"
+output: html_document
+smart: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+
+# 1 - Understand Context
+
+Fraud risk is everywhere, but for companies that advertise on-line, click fraud can happen at an overwhelming volume, resulting in misleading click data and wasted money. Ad channels can drive up costs by simply clicking on the ad at a large scale.  
+With over 1 billion smart mobile devices in active use every month, China is the largest mobile market in the world and therefore suffers from huge volumes of fraudulent traffic.  
+
+TalkingData, China's largest independent big data service platform, covers over 70% of active mobile devices nationwide. They handle 3 billion clicks per day, of which 90% are potentially fraudulent. Their current approach to prevent click fraud for app developers is to measure the journey of a users click across their portfolio, and flag IP addresses who produce lots of clicks, but never end up installing apps. With this information, they've built an IP blacklist and device blacklist.
+
+[Talking Data Kaggle website](https://www.kaggle.com/c/talkingdata-adtracking-fraud-detection)
+
+**Objective**: predict whether a user will download an app after clicking a mobile app ad.
+
+```{r include=FALSE}
+setwd("D:/FCD/01BigDataAzure/Projeto1")
+```
+
+```{r message=FALSE, , warning=FALSE}
+# Imports 
+library(rmarkdown)
+library(knitr)
+library(ggrepel)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+library(caret)
+```
+
+# 2 - Collect Data
+
+```{r Import raw data, message=FALSE}
+df_original <- read_csv('data/train.csv')
+paged_table(df_original, options = list(row.print = 5))
+```
+
+Data variables: 
+
+* **ip**: ip address of click;  
+* **app**: app id for marketing;  
+* **device**: device type id of user mobile phone (e.g., iphone 6 plus, iphone 7, huawei mate 7, etc.);  
+* **os**: os version id of user mobile phone; 
+* **channel**: channel id of mobile ad publisher;  
+* **click_time**: time-stamp of click (UTC);  
+* **attributed_time**: if user download the app for after clicking an ad, this is the time of the app download;  
+* **is_attributed**: the target that is to be predicted, indicating the app was downloaded.  
+
+**Obs:** Note that ip, app, device, os, and channel are encoded.  
+
+
+# 3 - Data Split and Under sampling 
+
+The variable *attributed_time* is perfectly correlated with the label we want to predict and is not available in new data. 
+
+```{r message=FALSE}
+dim(df_original)
+```
+
+There are `r dim(df_original)[1]` rows and `r dim(df_original)[2]` variables
+
+The variable attributed time is perfectly correlated with the label we want to predict and is not available in new data. Also the variable to be predicted is a factor (categorical). 
+```{r df_drop}
+df_drop <- 
+  df_original %>% 
+  select(-attributed_time) %>% 
+  mutate(is_attributed = as.factor(is_attributed))
+```
+```{r include=FALSE}
+rm(df_original)
+```
+
+Lets take a look on data range.
+```{r}
+range(df_drop$click_time)
+```
+
+The train dataset is composed of 3 days that goes from `r min(df_drop$click_time)` to `r max(df_drop$click_time)`.  
+
+Lets see if the label is balanced:  
+```{r}
+table(df_drop$is_attributed)
+```
+The train set is **not balanced**, lets under sample the train dataset considering the minor label
+
+```{r Splits into train test and validation, results='hide'}
+train_index <- createDataPartition(df_drop$is_attributed,
+                                   p = 0.7,
+                                   list = FALSE,
+                                   times = 1)
+
+df_train <- df_drop[train_index,]
+df_test_validation <- df_drop[-train_index,]
+
+test_index = createDataPartition(df_test_validation$is_attributed,
+                                 p = 0.67,
+                                 list = FALSE,
+                                 times = 1)
+
+df_test <- df_test_validation[test_index, ]
+df_vali <- df_test_validation[-test_index,]
+
+```
+
+
+See if no rows were missed:
+```{r}
+dim(df_drop)[1] == dim(df_train)[1] + dim(df_vali)[1] + dim(df_test)[1]
+```
+
+See if label proportions were respected
+```{r output prop for tables}
+table_name <- c('raw data', 'train data', 'validation data', 'test data')
+
+count = 1
+for (df in list(df_drop, df_train, df_vali, df_test)){
+  print(table_name[count])
+  print(round(prop.table(table(df$is_attributed))*100, 3))
+  count = count + 1
+}
+```
+
+```{r, include=FALSE}
+# Save current df's and clean memory
+write_csv(df_vali , file = "data/new_data2/validation.csv", col_names = TRUE)
+write_csv(df_test , file = "data/new_data2/test.csv", col_names = TRUE)
+rm(count)
+
+rm(df)
+rm(df_drop)
+rm(df_test)
+rm(df_test_validation)
+rm(df_vali)
+
+rm(table_name)
+rm(train_index)
+rm(test_index)
+```
+
+Balance output label in train dataset so that the model can learn the same as downloaded and not downloaded.
+An under sampling will be done due to the amount of data.
+
+```{r Balance train data}
+train_1 <- df_train %>% filter(is_attributed == 1)
+train_0 <- sample_n(df_train %>% filter(is_attributed == 0), nrow(train_1))
+train <- bind_rows(train_1, train_0) %>% arrange(click_time)
+
+# Verify if no row were lost
+dim(train_1)[1] * 2 == dim(train)[1] 
+```
+
+```{r , include=FALSE}
+rm(train_1)
+rm(train_0)
+rm(df_train)
+
+write_csv(train , file = "data/new_data2/train_balanced.csv", col_names = TRUE)
+rm(train)
+gc()
+```
+
+# 4 - Explore the data
+
+```{r, include=FALSE}
+# Load train 
+train <- read_csv(file = 'data/new_data2/train_balanced.csv', col_names = TRUE)
+train$is_attributed = as.factor(train$is_attributed)
+```
+
+```{r}
+# Check for NA values
+train %>%
+  summarise_all(~sum(is.na(.)))
+
+# Check distinct values
+train %>%
+  summarise_all(n_distinct)# A lot of distinct values occur per variable
+```
+No NA values are present in the train dataset and a lot of distinct values occur per variable
+
+We will now get the *hour* and the *day* from the *click_time* variable.
+```{r}
+train <- train %>% 
+  mutate(day = day(click_time),
+         hour = hour(click_time)) %>%
+  relocate(is_attributed, .after = last_col()) %>%
+  arrange(click_time)
+
+kable(head(train))
+```
+
+## 4.1 Data plot
+
+Prepare data for plotting grouping by hour and day
+```{r}
+click_timeseries <- train %>%
+  mutate(hour_trunc = floor_date(click_time, unit = 'hour')) %>%
+  group_by(hour_trunc) %>%
+  summarise(count_clicks = n(),
+            downloads = sum(is_attributed==1),
+            not_downloads = sum(is_attributed==0),
+            perc_downloads = downloads / count_clicks *100) %>%
+  filter(count_clicks > 100)
+```
+
+Function to plot number of downloads and non downloads through time
+```{r Plots clicks per hour, fig.height=4, fig.width=10}
+downlods_per_hour <- function(df){
+  ggplot(df) +
+  geom_line(aes(x = hour_trunc, y = downloads, color = 'Downloads'), size = 2) + 
+  geom_line(aes(x = hour_trunc, y = not_downloads, color = 'No Downloads'), size = 2) + 
+  scale_x_datetime(date_breaks = '4 hours', date_labels = '%H:%M') +
+  labs(title = 'Clicks per hour') + 
+  # Plot label at the end of line
+  geom_text_repel(data = click_timeseries %>% filter(hour_trunc == max(hour_trunc)), 
+                  aes(x = hour_trunc , y = downloads,  
+                      color = 'Downloads', label = 'Downloads' ), 
+                  size = 5,nudge_y = 0) +
+  geom_text_repel(data = click_timeseries %>% filter(hour_trunc == max(hour_trunc)), 
+                  aes(x = hour_trunc , y = not_downloads,  
+                      color = 'No Downloads', label = 'No Downloads' ), 
+                  size = 5, nudge_y = 2500, ) +
+  # Removes legend
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        axis.text.x = element_text(vjust = 0.1, hjust = 0, angle = 45))
+}
+downlods_per_hour(click_timeseries)
+```
+  
+It can be seen that the number of clicks has a pattern related to the hour.
+There is a high plateu between 00:00 and 13:00 and a low access between 14:00 and 22:00 h.
+
+Lets see the percentage of downloads per hour
+
+```{r percent of downloads per hour, fig.height=4, fig.width=10}
+perc_downloads_hour <- function(df){
+  ggplot(df) +
+  geom_line(aes(x = hour_trunc, y = perc_downloads), size = 2, color = "#174A7E") + 
+  geom_line(aes(x = hour_trunc, y = mean(perc_downloads)), 
+            linetype = 'dashed',
+            color = "#A6A6A5") +
+  geom_text(aes(x = max(hour_trunc) + hm('1 0'), 
+                y = mean(perc_downloads), 
+                label = 'Mean'),
+            nudge_y = 1, size = 5, color = "#A6A6A5") + 
+  scale_x_datetime(date_breaks = '4 hours', date_labels = '%H:%M') +
+  theme_classic(base_size = 16) + 
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        axis.text.x = element_text(vjust = 0.8, hjust = 0.8, angle = 45)) +
+  labs(title = '% Downloads per hour')
+}
+perc_downloads_hour(click_timeseries)
+```
+  
+It is possible to see that the number of downloads doubles when comparing the percentage between 16:00 and 4:00 h.   
+The time that the user accesses the ad may have an impact to predict the label
+
+Lets evaluate if some of the variable may have an impact on final prediction.
+
+```{r plot app, fig.height=4, fig.width=10}
+plot_app <- function(){
+  df_top_variable <- train %>%
+    group_by(is_attributed, app) %>%
+    summarise(count_app = n()) %>%
+    arrange(desc(count_app)) 
+  
+  top_variable <- unique(df_top_variable$app[1:20])
+  
+  df_top_variable %>% filter(app %in% top_variable) %>%
+    mutate(is_attributed = recode(is_attributed,
+                                  '0' = 'No', '1' = 'Yes'))%>%
+    ggplot() +
+    geom_col(aes(x = reorder(app, count_app), 
+                 y = count_app, 
+                 fill = is_attributed),
+             position = 'dodge') + 
+    theme_classic(base_size = 16)+ 
+    theme(legend.position = c(0.8, 0.2),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          axis.line = element_line(size = .1, color = "#BFBEBE"),
+          axis.text = element_text(color = "#929497"),
+          axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+          axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+          plot.title = element_text(color = "#555655"),
+          legend.text = element_text(colour = "#555655"),
+          legend.title = element_text(colour = "#555655")) +
+    labs(title = 'Accesses per app') + 
+    scale_fill_discrete(name = "download") + 
+    coord_flip()
+}
+
+plot_app()
+```
+
+It can be seen that the app has a considerable impact in predicting if a download will occur. For example. More than 90% accesses for app #19 downloaded. On the other side, accesses for app 3, 12, 14 commonly don't download
+
+
+```{r downloads per channel, echo=TRUE, results='hide', fig.height=4, fig.width=8}
+plot_channel <- function(){
+  df_top_variable <- train%>%
+    group_by(is_attributed, channel) %>%
+    summarise(count_channel = n()) %>%
+    arrange(desc(count_channel)) 
+  
+  top_variable <- unique(df_top_variable$channel[1:15])
+  
+  df_top_variable %>% filter(channel %in% top_variable) %>%
+    mutate(is_attributed = recode(is_attributed,
+                                  '0' = 'No', '1' = 'Yes'))%>%
+    ggplot() +
+    geom_col(aes(x = reorder(channel, count_channel), 
+                 y = count_channel, 
+                 fill = is_attributed),
+             position = 'dodge') + 
+    theme_classic(base_size = 16)+ 
+    theme(legend.position = c(0.8, 0.2),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          axis.line = element_line(size = .1, color = "#BFBEBE"),
+          axis.text = element_text(color = "#929497"),
+          axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+          axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+          plot.title = element_text(color = "#555655"),
+          legend.text = element_text(colour = "#555655"),
+          legend.title = element_text(colour = "#555655")) +
+    labs(title = 'Accesses per channel') + 
+    scale_fill_discrete(name = "download") + 
+    coord_flip()
+}
+plot_channel()
+```
+
+The channel seems to have a big impact on download rate, for instace if the the user accesses from channel 213, 113 and 21 it will probably download. On the other hand, channels 280, 245, 107 477 gave a low probability of download.
+
+
+```{r plot device, echo=TRUE, results='hide', fig.height=4, fig.width=10}
+plot_device <- function(){
+  df_top_variable <- train %>%
+    group_by(is_attributed, device) %>%
+    summarise(count_device = n()) %>%
+    arrange(desc(count_device)) 
+    
+  top_variable <- unique(df_top_variable$device[1:10])
+  
+  df_top_variable %>% filter(device %in% top_variable) %>%
+    mutate(is_attributed = recode(is_attributed,
+                                  '0' = 'No', '1' = 'Yes'))%>%
+    ggplot() +
+    geom_col(aes(x = reorder(device, count_device), 
+                 y = count_device, 
+                 fill = is_attributed),
+             position = 'dodge') + 
+    theme_classic(base_size = 16)+ 
+    theme(legend.position = c(0.8, 0.2),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          axis.line = element_line(size = .1, color = "#BFBEBE"),
+          axis.text = element_text(color = "#929497"),
+          axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+          axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+          plot.title = element_text(color = "#555655"),
+          legend.text = element_text(colour = "#555655"),
+          legend.title = element_text(colour = "#555655")) +
+    labs(title = 'Accesses per device') + 
+    scale_fill_discrete(name = "download") + 
+    coord_flip()
+}
+
+plot_device()
+```
+
+  
+It can be seen that device 1 has the majority of the accesses, however there is a considerable number of downloads from device 0.
+
+
+# 5 - Feature Engineering
+```{r feature engineering}
+
+feature_eng <- function(df, with_label = TRUE){
+  df_eng <- 
+  df %>%
+  # Grouping by ip in each hour of the day
+  add_count(ip, day, hour) %>%  rename('ip_day_hour' = n) %>%
+  add_count(ip, day, hour, channel) %>% rename('ip_day_hour_channel' = n) %>%
+  add_count(ip, day, hour, app) %>% rename('ip_day_hour_app' = n) %>%
+  add_count(ip, day, hour, app, channel) %>% rename('ip_day_hour_app_channel' = n) %>% 
+  # Grouping by ip in each day
+  add_count(ip, day) %>%  rename('ip_day' = n) %>%
+  add_count(ip, day, channel) %>% rename('ip_day_channel' = n) %>%
+  add_count(ip, day, app) %>% rename('ip_day_app' = n) %>%
+  add_count(ip, day, app, channel) %>% rename('ip_day_app_channel' = n) %>% 
+  # Grouping by ip, device and os in each hour of the day
+  add_count(ip, device, os, day, hour ) %>% rename('ip_device_os_hour_day' = n) %>%
+  add_count(ip, device, os, day, hour, channel) %>% rename('ip_device_os_day_hour_channel' = n) %>%
+  add_count(ip, device, os, day, hour, app) %>% rename('ip_device_os_day_hour_app' = n) %>%
+  add_count(ip, device, os, day, hour, app, channel) %>% rename('ip_device_os_day_hour_app_channel' = n) %>%
+  # Grouping by ip, device and os in each day
+  add_count(ip, device, os, day) %>% rename('ip_device_os_day' = n) %>%
+  add_count(ip, device, os, day, channel) %>% rename('ip_device_os_day_channel' = n) %>%
+  add_count(ip, device, os, day, app) %>% rename('ip_device_os_day_app' = n) %>%
+  add_count(ip, device, os, day, app, channel) %>% rename('ip_device_os_day_app_channel' = n)
+  
+  df_eng <- df_eng %>% select(-c(ip, click_time, day))
+  
+  return(df_eng)
+}
+
+train_fe <- feature_eng(train)
+paged_table(train_fe)
+```
+
+
+```{r, include=FALSE}
+write_csv(train_fe , file = "data/new_data2/train_fe.csv", col_names = TRUE)
+rm(train)
+gc()
+```
+
+# 6 - Feature Engineering on test and validation dataset
+
+```{r, include=FALSE}
+# Load final train data
+train_fe <- read_csv(file = 'data/new_data2/train_fe.csv', col_names = TRUE)
+
+# Load test data
+test <- read_csv(file = 'data/new_data2/test.csv', col_names = TRUE)
+vali <- read_csv(file = 'data/new_data2/validation.csv', col_names = TRUE)
+
+#Convert factor variables
+train_fe$is_attributed <- as.factor(train_fe$is_attributed)
+test$is_attributed <- as.factor(test$is_attributed)
+vali$is_attributed <- as.factor(vali$is_attributed)
+```
+
+Feature Engineering on test and validation dataset
+
+```{r feature engineering test and vali dataset, eval=FALSE}
+# Add day and hour variables
+test <- test %>% 
+    mutate(day = day(click_time),
+           hour = hour(click_time)) %>%
+    relocate(is_attributed, .after = last_col())
+
+vali <- vali %>% 
+  mutate(day = day(click_time),
+          hour = hour(click_time)) %>%
+  relocate(is_attributed, .after = last_col()) 
+
+# Feature Engineering
+test_fe <- feature_eng(test)
+vali_fe <- feature_eng(vali)
+```
+
+
+```{r echo=FALSE, eval=FALSE, message=FALSE}
+write_csv(test_fe , file = "data/new_data2/test_fe.csv", col_names = TRUE)
+write_csv(vali_fe , file = "data/new_data2/vali_fe.csv", col_names = TRUE)
+
+rm(test)
+rm(vali)
+gc()
+```
+
+```{r echo=FALSE, eval=TRUE, results='hide'}
+test_fe <- read_csv('data/new_data2/test_fe.csv')
+vali_fe <- read_csv('data/new_data2/vali_fe.csv')
+test_fe$is_attributed <- as.factor(test_fe$is_attributed)
+vali_fe$is_attributed <- as.factor(vali_fe$is_attributed)
+```
+
+# 7 - Model Selection
+
+We will run a set of classification models mainly with default settings in order to compare the performance of each one. The following models will be tested:  
+
+* Random Forest
+* Naive-Bayes
+* XGBoost
+* LightGBM
+
+In order to evaluate the performance the following metrics will be measured:
+
+* Accuracy
+* Precision
+* Recall
+* F1
+* AUC (Area under the curve)
+
+A greater importance will be given to the AUC because it is the metric that will be used to score the competition.
+
+```{r, message=FALSE, warning=FALSE}
+# We will try the following models
+library(parallel)
+library(doParallel)
+
+# Models
+library(randomForest) # Random Forest
+library(e1071) # Naive Bayes
+library(xgboost) # XGBoost
+library(lightgbm) #LGBM
+
+# Metrics
+library(pROC)
+library(ROCR)
+```
+ ## Built function to score the models
+ 
+```{r}
+model_score <- function(pred, label){
+  
+  factor_pred <- as.factor(ifelse(pred > 0.5,1,0))
+  cm <- caret::confusionMatrix(factor_pred, label)
+  
+  auc_score <- auc(label, pred)
+  
+  score <- round(c(cm$overall['Accuracy'],
+                   cm$byClass[c('Precision', 'Recall', 'F1')],
+                   auc_score), 2)
+  return(score)
+}
+```
+ 
+
+## Random Forest 
+```{r train random forest, cache=TRUE}
+rf <- randomForest(is_attributed ~.,
+                   data = train_fe,
+                   ntree = 25,
+                   nodesize = 100, # nodesize to avoid overfitting
+                   importance = TRUE)
+
+saveRDS(rf, "models/rf.rds")
+```
+
+
+### RF Score
+
+The test model will be scored with the test data as the train score was good
+```{r random forest prediction, cache=TRUE}
+rf_predicted <- predict(rf, test_fe, type = 'prob')
+rf_prob <- rf_predicted[,2]
+
+RF_score <- model_score(rf_prob, test_fe$is_attributed)
+rm(rf_prob)
+```
+
+## Naive Bayes
+
+```{r}
+nb <- naiveBayes(is_attributed ~.,
+                 data = train_fe,
+                 laplace = 1)
+
+saveRDS(nb, "models/nb.rds")
+```
+
+### NB Score  
+
+The NB train score model presented a poor value, probably due to the underfitting and the lack of the model to predict the non linear relation  
+
+```{r}
+nb_train_pred <- predict(nb, train_fe, 'raw')
+nb_pred_prob <- nb_train_pred[,2]
+
+NB_score <- model_score(nb_pred_prob, train_fe$is_attributed)
+```
+
+
+## Logistic Regression
+
+```{r Logistic Regression train, warning=FALSE}
+prepocValues <- preProcess(train_fe, method = c('center', 'scale'))
+
+train_scaled <- predict(prepocValues, train_fe)
+
+logReg <- glm(is_attributed ~.,
+              data = train_scaled,
+              family=binomial(link='logit'))
+
+saveRDS(logReg, "models/logreg.rds")
+```
+
+### Logistic Regression Score
+
+The  score will be performed on train since it is below the achieved with the other models
+```{r LogReg Score, message=FALSE}
+logReg_predict <- predict(logReg, train_scaled, type = 'response')
+
+logReg_score <- model_score(logReg_predict, train_scaled$is_attributed)
+```
+
+
+
+## XGBoost 
+```{r}
+dtrain <- xgb.DMatrix(data = as.matrix(train_fe %>% select(-is_attributed)), 
+                      label= as.matrix(train_fe$is_attributed))
+
+xgb_model <- xgboost(data = dtrain,
+                     objective = "binary:logistic",
+                     eval_metric = 'auc',
+                     verbose = 0,
+                     nrounds = 50)
+
+saveRDS(xgb_model, "models/xgboost.rds")
+```
+
+### XGBoost Score  
+
+```{r}
+pred <- predict(xgb_model, as.matrix(test_fe %>% select(-is_attributed)), type = 'response')
+
+xgb_score <- model_score(pred, test_fe$is_attributed)
+```
+
+
+## Light GBM 
+```{r}
+d2train <- lgb.Dataset(data = as.matrix(train_fe %>% select(-is_attributed)), 
+                      label= as.matrix(train_fe$is_attributed))
+
+# Model parameters
+params = list(objective = "binary",
+              metric = 'auc',
+              force_row_wise = T)
+
+# Train Model
+light <- lightgbm(data = d2train,
+                  params = params,
+                  verbose = 0)
+
+saveRDS(light, "models/light.rds")
+```
+
+### LightGBM Score
+
+```{r}
+pred_light <- predict(light, as.matrix(test_fe %>% select(-is_attributed)))
+
+light_score <- model_score(pred_light, test_fe$is_attributed)
+```
+
+
+# Base models comparison 
+
+Final table comparing models score
+
+```{r models score resume}
+models_score_geral <- data.frame('RandomForest' = RF_score,
+                    'NaiveBayes' = NB_score,
+                    'LogisticRegression' = logReg_score,
+                    'XGBoost' = xgb_score,
+                    'LightGBM' = light_score,
+                    row.names = c('Accuracy', 'Precision', 'Recall', 'F1', 'AUC'))
+
+paged_table(models_score_geral)
+```
+
+The LightGBM is not only one of the fastest but also presents the best results it will be considered for tuning purposes and feature selection.
+
+```{r plot metrics of models, fig.height=4, fig.width=10}
+# Plot graphic comparic metrics and models
+table_score <- as_tibble(models_score_geral)
+
+GRAY9 <- "#BFBEBE"
+BLUE2 <- "#4A81BF"
+
+table_score %>% 
+  mutate(metric = row.names(models_score_geral)) %>%
+  relocate(metric, .before = everything()) %>%
+  gather('RandomForest', 'NaiveBayes', 'LogisticRegression', 'XGBoost', 'LightGBM', key = 'model',value = 'score') %>%
+  arrange(metric) %>%
+  ggplot(aes(x = metric, y = score, fill = model)) +
+  geom_bar(stat = 'identity', position = 'dodge') + 
+  theme_classic(base_size = 16)+
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        legend.text = element_text(colour = "#555655"),
+        legend.title = element_blank()) +
+  scale_fill_manual(values = c(BLUE2, GRAY9,GRAY9,GRAY9,GRAY9), 
+                    labels = c("LightGBM",
+                               "Logistic Regression",
+                               "Naive Bayes",
+                               "Random Forest",
+                               "XGBoost"), 
+                    guide = guide_legend(reverse = T)) +
+  coord_flip() + 
+  labs(title = "Models and metrics overview" )
+```
+
+# Feature Selection
+
+We will search for the most impact features, while avoiding to decrease the train score. The approach will improve the generalization of the model for the new data. Latelly it will the generalization will also be improve on hyper parameter tuning.
+
+```{r}
+tree_imp <- lgb.importance(light, percentage = TRUE)
+tree_imp[,2:4] <- round(tree_imp[,2:4], 3)
+df_tree_imp <- as_tibble(tree_imp)
+paged_table(df_tree_imp)
+```
+
+The train will be performed considering the 7 most important features:
+
+ * app
+ * channel
+ * ip_day
+ * os
+ * hour
+ * device  
+ 
+```{r}
+d3train <- lgb.Dataset(data = as.matrix(train_fe %>% select(app, channel, ip_day, os, hour, device)), 
+                      label= as.matrix(train_fe$is_attributed))
+
+# Model parameters
+params2 = list(objective = "binary",
+              metric = 'auc',
+              force_row_wise = T)
+
+# Train Model
+light2 <- lightgbm(data = d3train,
+                  params = params2,
+                  verbose = 0)
+
+```
+
+```{r}
+pred_light <- predict(light2, as.matrix(test_fe %>% select(app, channel, ip_day, os, hour, device)))
+
+light_score2 <- model_score(pred_light, test_fe$is_attributed)
+
+print(light_score)
+```
+
+The score didn't get worse while using only 7 variables. The model is simpler, easier to be understood and with increased probability to predict better on new data.
+
+# Hyper Parameter Tuning
+
+We will look for several combinations of hyper parameters. The main objective is to improve the validation prediction score considering the AUC metric. There are 336 different combinations.
+
+```{r Grid Search }
+lightGBM_grid <- expand.grid( max_bin = c(255, 500, 1000, 1500),#255
+                              learning_rate = c(0.01, 0.05, 0.1 ), #0.1
+                              num_iterations = c(100, 250, 500, 1000), #100
+                              num_leaves = c(6, 8, 13, 18, 25, 31, 50)) #31
+```
+
+The models will be trained with different parameters and the AUC score of each one kept on a score_list variable.
+```{r Run Grid Search Optimization, echo =TRUE, eval=FALSE}
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster) 
+
+score_list = c()
+for (row in 1:nrow(lightGBM_grid)){
+  
+  print(paste(as.character(row), '/',  as.character(nrow(lightGBM_grid))))
+  
+  n  = lightGBM_grid[row,]
+  
+  params = list(objective = "binary",
+                metric = 'auc',
+                force_row_wise = T,
+                num_threads = 11,
+                learning_rate = n$learning_rate,
+                num_iterations = n$num_iterations,
+                num_leaves = n$num_leaves,
+                max_bin = n$max_bin)
+  
+  d4train <- lgb.Dataset(data = as.matrix(train_fe %>% select(app, channel, ip_day, os, hour, device)), 
+                         label= as.matrix(train_fe$is_attributed))
+  
+  light_hyper <- lightgbm(data = d4train,
+                    params = params,
+                    verbose = 0)
+
+  vali_light <- predict(light_hyper, as.matrix(vali_fe %>% select(app, channel, ip_day, os, hour, device)))
+
+  auc_score <- auc(vali_fe$is_attributed, vali_light, quiet = TRUE)
+  print(auc_score)
+  score_list <- c(score_list, auc_score)
+}
+
+grid_score <- lightGBM_grid %>% mutate(auc = score_list)
+grid_score %>% arrange(desc(auc)) %>% head()
+
+write_csv(grid_score, file = 'models/grid_score.csv')
+```
+```{r, echo = FALSE, eval=TRUE}
+grid_score <- read_csv('models/grid_score.csv')
+grid_score <- grid_score %>% arrange(desc(auc))
+paged_table(grid_score)
+```
+
+
+The model with the best validation score had the following parameters:
+
+ * **max_bin** = 500
+ * **learning_rate** = 0.1
+ * **num_iterations** = 500
+ * **num_leaves** = 13
+ 
+# Train final model with all available data
+
+```{r, message=FALSE}
+# Import data
+df_train <- read_csv('data/train.csv')
+df_train <- df_train %>% select(-attributed_time)
+```
+Buil a function to do the feature engineering with only the 7 variables chosen.
+
+```{r}
+feature_eng_simplified <- function(df, with_label = TRUE){
+  df_eng <- 
+  df %>%
+  # Grouping by ip in each day
+  add_count(ip, day) %>%  rename('ip_day' = n)
+  
+  
+  df_eng <- df_eng %>% select(-c(ip, click_time, day))
+  
+  return(df_eng)
+}
+
+```
+
+Balance data, convert label to factor and perform feature engineering as before.
+```{r}
+train_1 <- df_train %>% filter(is_attributed == 1)
+train_0 <- sample_n(df_train %>% filter(is_attributed == 0), nrow(train_1))
+train <- bind_rows(train_1, train_0) %>% arrange(click_time)
+
+rm(df_train)
+rm(train_1)
+rm(train_0)
+
+train$is_attributed <- as.factor(train$is_attributed)
+
+train <- train %>% 
+  mutate(day = day(click_time),
+         hour = hour(click_time)) %>%
+  relocate(is_attributed, .after = last_col())
+
+train_fe <- feature_eng_simplified(train)
+```
+
+Train model with optimized hyper parameters.  
+
+```{r Train final model}
+dtrain <- lgb.Dataset(data = as.matrix(train_fe %>% select(app, channel, ip_day, os, hour, device)), 
+                       label= as.matrix(train_fe$is_attributed))
+      
+params = list(objective = "binary",
+             metric = 'auc',
+             force_row_wise = T,
+             num_threads = 11,
+             learning_rate = 0.1,
+             num_iterations = 500,
+             num_leaves = 13,
+             max_bin = 500)
+                       
+light <- lightgbm(data = dtrain,
+                  params = params,
+                  verbose = 0)  
+```
+
+Import the new dataset which has unknown label
+
+```{r Import new data, message=FALSE}
+new_data <- read_csv(file = 'data/test.csv')
+
+new_data <- new_data %>% 
+  mutate(day = day(click_time),
+         hour = hour(click_time))
+
+new_data_fe <- feature_eng_simplified(new_data)
+```
+
+Perform the simplified feature engineering.  
+
+```{r Predict on new data and export the results}
+pred_final <- predict(light, as.matrix(new_data_fe %>% select(app, channel, ip_day, os, hour, device)))
+
+df_pred_final <- data.frame(click_id = new_data$click_id,
+                            is_attributed = pred_final)
+
+write_csv(df_pred_final, file = 'data/results3.csv')
+```
+
+The predict label were submitted to the kaggle and a final score was achieved:
+
+ * **private score** = 0.95752
+ * **public score** = 0.95677
+
+The final score is similar to the best validation which tell us that were able to build a model that predict with new data.
